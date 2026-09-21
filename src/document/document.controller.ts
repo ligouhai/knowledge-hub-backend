@@ -1,7 +1,7 @@
 /*
  * @Date: 2026-09-01 11:39:20
  * @LastEditors: zhujinyi
- * @LastEditTime: 2026-09-07 14:20:33
+ * @LastEditTime: 2026-09-15 14:52:46
  */
 import {
   BadRequestException,
@@ -20,19 +20,38 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import type { AuthUser } from '../auth/auth-user.interface';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { DocumentReviewService } from './document-review.service';
 import { DocumentService } from './document.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { QueryDocumentDto } from './dto/query-document.dto';
+import { QueryReviewTasksDto, ReviewDecisionDto } from './dto/review.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { UploadParseDto } from './dto/upload-parse.dto';
 @Controller('documents')
 export class DocumentController {
-  constructor(private readonly documentService: DocumentService) {}
+  constructor(
+    private readonly documentService: DocumentService,
+    private readonly reviewService: DocumentReviewService,
+  ) {}
 
   // 创建文档
   @Post()
-  create(@Body() dto: CreateDocumentDto) {
-    return this.documentService.create(dto);
+  create(@Body() dto: CreateDocumentDto, @CurrentUser() user: AuthUser) {
+    return this.documentService.create(dto, user);
+  }
+
+  /** 审核待办列表（须在 @Get(':id') 之前注册，避免路由被 :id 吃掉） */
+  @Get('reviews/tasks')
+  listReviewTasks(@Query() query: QueryReviewTasksDto) {
+    return this.reviewService.listTasks(query);
+  }
+
+  /** 待审核数量（导航角标等） */
+  @Get('reviews/tasks/pending-count')
+  pendingReviewCount() {
+    return this.reviewService.getPendingCount();
   }
 
   // 查询文档列表
@@ -47,6 +66,66 @@ export class DocumentController {
     return this.documentService.publish(id);
   }
 
+  /** 归档：Published → Archived，并清 RAG/Search/KG 索引 */
+  @Put(':id/archive')
+  archive(@Param('id') id: string) {
+    return this.documentService.archive(id);
+  }
+
+  /** 下架编辑：Published → Draft，清索引后可改内容再提审/发布 */
+  @Put(':id/save-draft')
+  saveAsDraft(@Param('id') id: string) {
+    return this.documentService.saveAsDraft(id);
+  }
+
+  /** 单独提交审核（也可由 publish 在需审核时内部调用） */
+  @Post(':id/reviews/submit')
+  submitReview(@Param('id') id: string) {
+    return this.reviewService.submitForReview(id);
+  }
+
+  /** 当前待审记录（review_result IS NULL） */
+  @Get(':id/reviews/current')
+  getCurrentReview(@Param('id') id: string) {
+    return this.reviewService.getCurrentReview(id);
+  }
+
+  /** 该文档全部审核历史，按 created_at 倒序 */
+  @Get(':id/reviews/history')
+  getReviewHistory(@Param('id') id: string) {
+    return this.reviewService.getReviewHistory(id);
+  }
+
+  /** 审核通过 → 文档 Published + 重建索引 */
+  @Post('reviews/tasks/:taskId/approve')
+  approveReview(
+    @Param('taskId') taskId: string,
+    @Body() dto: ReviewDecisionDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.reviewService.approveReview(
+      taskId,
+      user.userId,
+      user.realName ?? user.username,
+      dto.reviewComment,
+    );
+  }
+
+  /** 审核驳回 → 文档回 Draft，作者可修改后再次 submit */
+  @Post('reviews/tasks/:taskId/reject')
+  rejectReview(
+    @Param('taskId') taskId: string,
+    @Body() dto: ReviewDecisionDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.reviewService.rejectReview(
+      taskId,
+      dto.reviewComment ?? '',
+      user.userId,
+      user.realName ?? user.username,
+    );
+  }
+
   // 查询文档详情
   @Get(':id')
   findOne(@Param('id') id: string) {
@@ -55,8 +134,12 @@ export class DocumentController {
 
   // 更新文档
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: UpdateDocumentDto) {
-    return this.documentService.update(id, dto);
+  update(
+    @Param('id') id: string,
+    @Body() dto: UpdateDocumentDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.documentService.update(id, dto, user);
   }
   // 软删除文档
   @Delete(':id')
@@ -76,10 +159,11 @@ export class DocumentController {
   uploadAndParse(
     @UploadedFile() file: Express.Multer.File,
     @Body() meta: UploadParseDto,
+    @CurrentUser() user: AuthUser,
   ) {
     if (!file) {
       throw new BadRequestException('请上传文件（form-data 字段名：file）');
     }
-    return this.documentService.uploadAndCreateDocument(file, meta);
+    return this.documentService.uploadAndCreateDocument(file, meta, user);
   }
 }

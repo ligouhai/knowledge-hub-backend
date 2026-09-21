@@ -5,7 +5,7 @@ import {
   PrimaryColumn,
   UpdateDateColumn,
 } from 'typeorm';
-import { bigintTransformer } from '../../common/transfomers/bigint.transformer';
+import { bigintTransformer } from '../../common/transformers/bigint.transformer';
 import { DocumentStatus } from '../document-status';
 
 /** 文档元数据（PostgreSQL kh_document） */

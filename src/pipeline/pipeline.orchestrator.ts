@@ -87,6 +87,7 @@ export class PipelineOrchestrator {
         return;
       }
       await this.searchIndexService.indexDocument(document);
+      return;
     }
 
     this.logger.warn(`忽略未支持的 Search 消息：type=${type}`);

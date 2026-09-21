@@ -7,11 +7,13 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { InjectEntityManager } from '@nestjs/typeorm';
 import { Model } from 'mongoose';
+import { AuthUser } from 'src/auth/auth-user.interface';
 import { EntityManager } from 'typeorm';
 import { nextSnowflakeId } from '../common/snowflake-id';
 import { DocumentPipelinePublisher } from '../mq/document-pipeline.publisher';
 import { RustfsService } from '../storage/rustfs.service';
-import { DocumentStatus } from './document-status';
+import { DocumentReviewService } from './document-review.service';
+import { DocumentStatus, canArchive, canPublishFrom } from './document-status';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { QueryDocumentDto } from './dto/query-document.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
@@ -48,6 +50,8 @@ export class DocumentService {
     private readonly fileParserService: FileParserService,
     private readonly rustfs: RustfsService,
     private readonly pipelinePublisher: DocumentPipelinePublisher,
+    /** 发布审核：是否需审、提交/通过/驳回 */
+    private readonly reviewService: DocumentReviewService,
   ) {}
 
   /**
@@ -55,7 +59,7 @@ export class DocumentService {
    * 流程：生成雪花 ID → 写 Mongo 正文（拿 ObjectId）→ 写 Postgres 元数据
    * 若 Postgres 写入失败，回滚删除已写入的 Mongo 正文，避免脏数据
    */
-  async create(dto: CreateDocumentDto) {
+  async create(dto: CreateDocumentDto, user: AuthUser) {
     const id = nextSnowflakeId();
     const wordCount = this.countWords(dto.content);
     const status: DocumentStatus = dto.status ?? DocumentStatus.Draft;
@@ -82,7 +86,7 @@ export class DocumentService {
         summary: dto.summary,
         categoryId: dto.categoryId,
         teamId: dto.teamId,
-        authorId: dto.authorId,
+        authorId: dto.authorId ?? user.userId,
         coverImage: dto.coverImage,
         tags: dto.tags,
         status,
@@ -91,8 +95,8 @@ export class DocumentService {
         wordCount,
         // 创建即发布时，记录发布时间
         publishTime: status === DocumentStatus.Published ? new Date() : null,
-        createBy: dto.createBy,
-        updateBy: dto.createBy,
+        createBy: dto.createBy ?? user?.userId,
+        updateBy: dto.createBy ?? user?.userId,
         deleted: false,
       });
 
@@ -185,7 +189,7 @@ export class DocumentService {
    * - 其余字段只更新 Postgres 元数据
    * - 首次变为「已发布」时写入 publishTime
    */
-  async update(id: string, dto: UpdateDocumentDto) {
+  async update(id: string, dto: UpdateDocumentDto, user: AuthUser) {
     const doc = await this.em.findOne(DocumentEntity, {
       where: { id, deleted: false },
     });
@@ -233,6 +237,7 @@ export class DocumentService {
     if (dto.remark !== undefined) doc.remark = dto.remark;
     if (dto.isPublic !== undefined) doc.isPublic = dto.isPublic;
     if (dto.updateBy !== undefined) doc.updateBy = dto.updateBy;
+    else if (user?.userId) doc.updateBy = user.userId;
 
     // 状态从非发布 → 发布时，记录发布时间
     if (dto.status !== undefined) {
@@ -259,16 +264,9 @@ export class DocumentService {
   }
 
   /**
-   * 直接发布文档（不做审核）
-   *
-   * 流程：
-   * 1. 校验文档存在且状态为草稿 / 已发布
-   * 2. 写库：status=Published，刷新 publishTime
-   * 3. 读 Mongo 正文，投递 RabbitMQ（RAG 向量化）
-   * 4. 投递失败只打日志，不回滚「已发布」状态
-   *
-   * 异步消费侧见 DocumentPipelineConsumer → PipelineOrchestrator：
-   * 分块(ChunkingService) → 嵌入 → ES(kh_chunk)
+   * 发布文档
+   * - 需审核：Draft / Published → PendingReview（不索引）
+   * - 免审：Draft / Published / Archived → Published + 索引
    */
   async publish(id: string) {
     this.logger.log(`发布文档：documentId=${id}`);
@@ -280,10 +278,46 @@ export class DocumentService {
       throw new NotFoundException(`Document ${id} not found`);
     }
 
-    // 仅草稿 / 已发布可发布（已发布再次发布会重建索引）
+    if (!canPublishFrom(doc.status)) {
+      throw new BadRequestException('当前文档状态不允许发布');
+    }
+
+    if (doc.status === DocumentStatus.PendingReview) {
+      throw new BadRequestException('文档审核中，请等待审核结果');
+    }
+
+    if (this.reviewService.isRequireApproval()) {
+      // 草稿或已发布：进入待审，不建索引；来自 Published 时 submitForReview 内会清旧索引
+      if (
+        doc.status === DocumentStatus.Draft ||
+        doc.status === DocumentStatus.Published
+      ) {
+        const saved = await this.reviewService.submitForReview(id);
+        const content = await this.loadContent(saved.contentId);
+        return { ...saved, content };
+      }
+    }
+
+    return this.directPublish(id);
+  }
+
+  /**
+   * 免审直接发布
+   * 也供 DocumentReviewService.approveReview 间接使用（审核通过后 status→Published）
+   */
+  async directPublish(id: string) {
+    const doc = await this.em.findOne(DocumentEntity, {
+      where: { id, deleted: false },
+    });
+    if (!doc) {
+      throw new NotFoundException(`Document ${id} not found`);
+    }
+
     if (
       doc.status !== DocumentStatus.Draft &&
-      doc.status !== DocumentStatus.Published
+      doc.status !== DocumentStatus.Published &&
+      doc.status !== DocumentStatus.Archived &&
+      doc.status !== DocumentStatus.PendingReview
     ) {
       throw new BadRequestException('当前文档状态不允许发布');
     }
@@ -291,24 +325,51 @@ export class DocumentService {
     doc.status = DocumentStatus.Published;
     doc.publishTime = new Date();
     const saved = await this.em.save(doc);
-
-    const contentDoc = await this.contentModel
-      .findOne({ _id: doc.contentId, deleted: false })
-      .lean();
-    const content = contentDoc?.content ?? null;
-
-    // MQ 失败不影响发布成功
-    try {
-      await this.pipelinePublisher.afterPublish(saved, content);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(
-        `发布后管线投递失败（不影响发布）：documentId=${id}, error=${message}`,
-      );
-    }
+    const content = await this.loadContent(saved.contentId);
+    await this.safePublish(saved, content);
 
     this.logger.log(`文档发布成功：documentId=${id}`);
-    return { ...saved, content: content ?? '' };
+    return { ...saved, content };
+  }
+
+  /** 归档：Published → Archived，清索引 */
+  async archive(id: string) {
+    const doc = await this.em.findOne(DocumentEntity, {
+      where: { id, deleted: false },
+    });
+    if (!doc) {
+      throw new NotFoundException(`Document ${id} not found`);
+    }
+    if (!canArchive(doc.status)) {
+      throw new BadRequestException('只有已发布文档可以归档');
+    }
+
+    doc.status = DocumentStatus.Archived;
+    const saved = await this.em.save(doc);
+    await this.safeUnpublish(id);
+
+    this.logger.log(`文档已归档：documentId=${id}`);
+    return saved;
+  }
+
+  /** 已发布 → 草稿（保存草稿），清索引 */
+  async saveAsDraft(id: string) {
+    const doc = await this.em.findOne(DocumentEntity, {
+      where: { id, deleted: false },
+    });
+    if (!doc) {
+      throw new NotFoundException(`Document ${id} not found`);
+    }
+    if (doc.status !== DocumentStatus.Published) {
+      throw new BadRequestException('只有已发布文档可以保存为草稿');
+    }
+
+    doc.status = DocumentStatus.Draft;
+    const saved = await this.em.save(doc);
+    await this.safeUnpublish(id);
+
+    this.logger.log(`文档已保存为草稿：documentId=${id}`);
+    return saved;
   }
 
   /**
@@ -347,6 +408,7 @@ export class DocumentService {
   async uploadAndCreateDocument(
     file: Express.Multer.File,
     meta: UploadParseDto = {},
+    user: AuthUser,
   ) {
     if (!file?.buffer?.length) {
       throw new BadRequestException('文件不能为空');
@@ -400,18 +462,21 @@ export class DocumentService {
 
     const title = titleFromFilename(originalFilename);
 
-    const created = await this.create({
-      title,
-      content: parsedContent,
-      categoryId: meta.categoryId,
-      teamId: meta.teamId,
-      authorId: meta.authorId,
-      tags: meta.tags,
-      remark: meta.remark,
-      createBy: meta.createBy,
-      isPublic: meta.isPublic,
-      status: DocumentStatus.Draft,
-    });
+    const created = await this.create(
+      {
+        title,
+        content: parsedContent,
+        categoryId: meta.categoryId,
+        teamId: meta.teamId,
+        authorId: meta.authorId,
+        tags: meta.tags,
+        remark: meta.remark,
+        createBy: meta.createBy,
+        isPublic: meta.isPublic,
+        status: DocumentStatus.Draft,
+      },
+      user,
+    );
 
     const previewLen = Math.min(200, parsedContent.length);
     const result = {
@@ -430,6 +495,65 @@ export class DocumentService {
     );
 
     return result;
+  }
+
+  /**
+   * 更新后根据状态变化同步索引
+   * - Published → 非 Published：清索引
+   * - 仍为 Published 且正文变了：免审模式下重建索引；需审核模式下等再次发布/审核通过
+   */
+  private async syncPipelineAfterUpdate(
+    doc: DocumentEntity,
+    oldStatus: DocumentStatus,
+    newStatus: DocumentStatus,
+    contentChanged: boolean,
+    content: string,
+  ) {
+    const wasPublished = oldStatus === DocumentStatus.Published;
+    const isPublished = newStatus === DocumentStatus.Published;
+
+    if (wasPublished && !isPublished) {
+      await this.safeUnpublish(doc.id);
+      return;
+    }
+
+    if (isPublished && contentChanged) {
+      if (!this.reviewService.isRequireApproval()) {
+        await this.safePublish(doc, content);
+      }
+    }
+  }
+
+  /** 从 Mongo 读取正文（publish / 审核通过后建索引用） */
+  private async loadContent(contentId: string): Promise<string> {
+    const contentDoc = await this.contentModel
+      .findOne({ _id: contentId, deleted: false })
+      .lean();
+    return contentDoc?.content ?? '';
+  }
+
+  /** 投递 MQ：RAG 分块向量 + 全文搜索 + KG 建图（失败不回滚文档状态） */
+  private async safePublish(doc: DocumentEntity, content: string) {
+    try {
+      await this.pipelinePublisher.afterPublish(doc, content);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `索引投递失败（不影响文档状态）：documentId=${doc.id}, ${message}`,
+      );
+    }
+  }
+
+  /** 投递 MQ：删除该文档在 ES / Neo4j 等侧的索引数据 */
+  private async safeUnpublish(documentId: string) {
+    try {
+      await this.pipelinePublisher.afterUnpublish(documentId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `索引清理投递失败：documentId=${documentId}, ${message}`,
+      );
+    }
   }
 
   /**

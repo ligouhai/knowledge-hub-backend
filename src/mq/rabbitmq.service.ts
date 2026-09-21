@@ -21,6 +21,7 @@ import {
   RAG_RK_DELETE,
   SEARCH_INDEX_EXCHANGE,
   SEARCH_INDEX_QUEUE,
+  SEARCH_RK_DELETE,
   SEARCH_RK_INDEX,
 } from './mq.constants';
 
@@ -178,11 +179,10 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
       SEARCH_INDEX_EXCHANGE,
       SEARCH_RK_INDEX,
     );
-
     await ch.bindQueue(
       SEARCH_INDEX_QUEUE,
       SEARCH_INDEX_EXCHANGE,
-      SEARCH_RK_INDEX,
+      SEARCH_RK_DELETE,
     );
 
     await ch.assertExchange(KG_GRAPH_EXCHANGE, 'topic', { durable: true });
