@@ -1,7 +1,7 @@
 /*
  * @Date: 2026-09-01 10:33:21
  * @LastEditors: zhujinyi
- * @LastEditTime: 2026-09-18 16:43:34
+ * @LastEditTime: 2026-09-22 16:28:35
  */
 import { MailerModule } from '@nestjs-modules/mailer';
 import { Module } from '@nestjs/common';
@@ -28,6 +28,8 @@ import { UserPermissionEntity } from './user/entities/user-permission.entity';
 import { UserRoleEntity } from './user/entities/user-role.entity';
 import { UserEntity } from './user/entities/user.entity';
 import { UserModule } from './user/user.module';
+import { SearchModule } from './search/search.module';
+import { GraphModule } from './graph/graph.module';
 
 @Module({
   imports: [
@@ -90,6 +92,8 @@ import { UserModule } from './user/user.module';
     AuthModule,
     DocumentModule,
     TeamModule,
+    SearchModule,
+    GraphModule,
   ],
   controllers: [AppController],
   providers: [AppService],

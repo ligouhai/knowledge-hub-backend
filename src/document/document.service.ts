@@ -86,7 +86,7 @@ export class DocumentService {
         summary: dto.summary,
         categoryId: dto.categoryId,
         teamId: dto.teamId,
-        authorId: dto.authorId ?? user.userId,
+        authorId: user.userId,
         coverImage: dto.coverImage,
         tags: dto.tags,
         status,
@@ -95,8 +95,8 @@ export class DocumentService {
         wordCount,
         // 创建即发布时，记录发布时间
         publishTime: status === DocumentStatus.Published ? new Date() : null,
-        createBy: dto.createBy ?? user?.userId,
-        updateBy: dto.createBy ?? user?.userId,
+        createBy: user?.userId,
+        updateBy: user?.userId,
         deleted: false,
       });
 
@@ -268,7 +268,7 @@ export class DocumentService {
    * - 需审核：Draft / Published → PendingReview（不索引）
    * - 免审：Draft / Published / Archived → Published + 索引
    */
-  async publish(id: string) {
+  async publish(id: string, user: AuthUser) {
     this.logger.log(`发布文档：documentId=${id}`);
 
     const doc = await this.em.findOne(DocumentEntity, {
@@ -292,20 +292,20 @@ export class DocumentService {
         doc.status === DocumentStatus.Draft ||
         doc.status === DocumentStatus.Published
       ) {
-        const saved = await this.reviewService.submitForReview(id);
+        const saved = await this.reviewService.submitForReview(id, user);
         const content = await this.loadContent(saved.contentId);
         return { ...saved, content };
       }
     }
 
-    return this.directPublish(id);
+    return this.directPublish(id, user);
   }
 
   /**
    * 免审直接发布
    * 也供 DocumentReviewService.approveReview 间接使用（审核通过后 status→Published）
    */
-  async directPublish(id: string) {
+  async directPublish(id: string, user: AuthUser) {
     const doc = await this.em.findOne(DocumentEntity, {
       where: { id, deleted: false },
     });
@@ -324,16 +324,17 @@ export class DocumentService {
 
     doc.status = DocumentStatus.Published;
     doc.publishTime = new Date();
+    if (user?.userId) doc.updateBy = user.userId;
     const saved = await this.em.save(doc);
     const content = await this.loadContent(saved.contentId);
-    await this.safePublish(saved, content);
+    await this.safePublish(saved);
 
     this.logger.log(`文档发布成功：documentId=${id}`);
     return { ...saved, content };
   }
 
   /** 归档：Published → Archived，清索引 */
-  async archive(id: string) {
+  async archive(id: string, user: AuthUser) {
     const doc = await this.em.findOne(DocumentEntity, {
       where: { id, deleted: false },
     });
@@ -345,6 +346,7 @@ export class DocumentService {
     }
 
     doc.status = DocumentStatus.Archived;
+    doc.updateBy = user.userId;
     const saved = await this.em.save(doc);
     await this.safeUnpublish(id);
 
@@ -353,7 +355,7 @@ export class DocumentService {
   }
 
   /** 已发布 → 草稿（保存草稿），清索引 */
-  async saveAsDraft(id: string) {
+  async saveAsDraft(id: string, user: AuthUser) {
     const doc = await this.em.findOne(DocumentEntity, {
       where: { id, deleted: false },
     });
@@ -365,6 +367,7 @@ export class DocumentService {
     }
 
     doc.status = DocumentStatus.Draft;
+    doc.updateBy = user.userId;
     const saved = await this.em.save(doc);
     await this.safeUnpublish(id);
 
@@ -377,7 +380,7 @@ export class DocumentService {
    * Postgres、Mongo 两侧都将 deleted 置为 true（不物理删正文）
    * 并异步清理 ES 搜索索引与向量块
    */
-  async remove(id: string) {
+  async remove(id: string, user: AuthUser) {
     const doc = await this.em.findOne(DocumentEntity, {
       where: { id, deleted: false },
     });
@@ -386,6 +389,7 @@ export class DocumentService {
     }
 
     doc.deleted = true;
+    doc.updateBy = user.userId;
     await this.em.save(doc);
     await this.contentModel.updateOne(
       { _id: doc.contentId },
@@ -507,7 +511,6 @@ export class DocumentService {
     oldStatus: DocumentStatus,
     newStatus: DocumentStatus,
     contentChanged: boolean,
-    content: string,
   ) {
     const wasPublished = oldStatus === DocumentStatus.Published;
     const isPublished = newStatus === DocumentStatus.Published;
@@ -519,7 +522,7 @@ export class DocumentService {
 
     if (isPublished && contentChanged) {
       if (!this.reviewService.isRequireApproval()) {
-        await this.safePublish(doc, content);
+        await this.safePublish(doc);
       }
     }
   }
@@ -533,9 +536,9 @@ export class DocumentService {
   }
 
   /** 投递 MQ：RAG 分块向量 + 全文搜索 + KG 建图（失败不回滚文档状态） */
-  private async safePublish(doc: DocumentEntity, content: string) {
+  private async safePublish(doc: DocumentEntity) {
     try {
-      await this.pipelinePublisher.afterPublish(doc, content);
+      await this.pipelinePublisher.afterPublish(doc);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(

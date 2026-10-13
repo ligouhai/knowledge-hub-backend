@@ -1,7 +1,7 @@
 /*
  * @Date: 2026-09-07 10:35:05
  * @LastEditors: zhujinyi
- * @LastEditTime: 2026-09-10 14:12:03
+ * @LastEditTime: 2026-09-21 16:01:41
  */
 import { Injectable, Logger } from '@nestjs/common';
 import { ConsumeMessage } from 'amqplib';
@@ -58,11 +58,7 @@ export class DocumentPipelineConsumer {
     this.logger.log(
       `[Search] type=${body.type}, taskId=${body.taskId}, documentId=${body.documentId}`,
     );
-    await this.orchestrator.handleSearchIndex(
-      body.type,
-      body.documentId,
-      body.document,
-    );
+    await this.orchestrator.handleSearchIndex(body.type, body.documentId);
   }
 
   /** KG：图谱 → ES kh_graph（dense_vector） */

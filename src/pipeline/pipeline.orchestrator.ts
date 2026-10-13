@@ -71,22 +71,20 @@ export class PipelineOrchestrator {
   }
 
   /** 处理 Search 重建消息。 */
-  async handleSearchIndex(
-    type: string,
-    documentId: string,
-    document?: Record<string, unknown>,
-  ) {
+  async handleSearchIndex(type: string, documentId: string) {
     if (type === 'DELETE') {
       await this.searchIndexService.deleteDocument(documentId);
       return;
     }
 
     if (type === 'INDEX') {
-      if (!document) {
-        this.logger.warn(`忽略未支持的 Search 消息：type=${type}`);
+      const docs = await this.loadDocumentsByIds([documentId]);
+      const doc = docs[0];
+      if (!doc) {
+        this.logger.warn(`Search INDEX 文档不存在：documentId=${documentId}`);
         return;
       }
-      await this.searchIndexService.indexDocument(document);
+      await this.searchIndexService.indexDocument(this.toSearchIndexDoc(doc));
       return;
     }
 
@@ -218,5 +216,26 @@ export class PipelineOrchestrator {
 
     this.logger.log(`KG 开始构建：type=${type}, total=${docs.length}`);
     await this.graphBuildService.buildBatch(docs);
+  }
+
+  /** Postgres 元数据 + Mongo 全文 → ES kh_document 文档 */
+  private toSearchIndexDoc(doc: PipelineDocument): Record<string, unknown> {
+    return {
+      id: doc.id,
+      title: doc.title,
+      summary: doc.summary ?? null,
+      content: doc.content ?? '',
+      categoryId: doc.categoryId ?? null,
+      tags: doc.tags ?? null,
+      status: doc.status,
+      isPublic: doc.isPublic,
+      viewCount: doc.viewCount,
+      likeCount: doc.likeCount,
+      commentCount: doc.commentCount,
+      authorId: doc.authorId ?? null,
+      publishTime: this.toIsoDate(doc.publishTime),
+      createdAt: this.toIsoDate(doc.createdAt),
+      updatedAt: this.toIsoDate(doc.updatedAt),
+    };
   }
 }

@@ -1,7 +1,7 @@
 /*
  * @Date: 2026-09-07 10:34:22
  * @LastEditors: zhujinyi
- * @LastEditTime: 2026-09-10 11:02:09
+ * @LastEditTime: 2026-09-21 16:08:42
  */
 import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
@@ -37,10 +37,10 @@ export class DocumentPipelinePublisher {
   constructor(private readonly rabbit: RabbitMqService) {}
 
   /** 发布成功后调用：投递 RAG 分块向量化任务 */
-  async afterPublish(document: DocumentEntity, content: string | null) {
+  async afterPublish(document: DocumentEntity) {
     await Promise.all([
       this.triggerRagReindex(document.id),
-      this.triggerSearchIndex(document, content),
+      this.triggerSearchIndex(document.id),
       this.triggerKgBuild(document.id),
     ]);
   }
@@ -87,15 +87,11 @@ export class DocumentPipelinePublisher {
    * Search：消息内直接带文档快照，消费者无需再查库也能写索引。
    * content 只截前 1000 字，控制消息体积。
    */
-  private async triggerSearchIndex(
-    document: DocumentEntity,
-    content?: string | null,
-  ) {
+  private async triggerSearchIndex(documentId: string) {
     const message: SearchIndexMessage = {
       taskId: randomUUID(),
       type: 'INDEX',
-      documentId: document.id,
-      document: this.buildSearchIndexData(document, content),
+      documentId,
     };
     const ok = await this.rabbit.publish(
       SEARCH_INDEX_EXCHANGE,
@@ -103,7 +99,7 @@ export class DocumentPipelinePublisher {
       message,
     );
     this.logger.log(
-      `ES 搜索索引${ok ? '已投递' : '投递失败'}：documentId=${document.id}, taskId=${message.taskId}`,
+      `ES 搜索索引${ok ? '已投递' : '投递失败'}：documentId=${documentId}, taskId=${message.taskId}`,
     );
   }
 

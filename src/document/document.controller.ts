@@ -1,7 +1,7 @@
 /*
  * @Date: 2026-09-01 11:39:20
  * @LastEditors: zhujinyi
- * @LastEditTime: 2026-09-15 14:52:46
+ * @LastEditTime: 2026-09-22 14:57:56
  */
 import {
   BadRequestException,
@@ -20,8 +20,12 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Roles } from 'src/auth/decorators/roles.decorator';
 import type { AuthUser } from '../auth/auth-user.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { RequirePermission } from '../auth/decorators/require-permission.decorator';
+import { PermissionCode } from '../common/constants/permissions';
+import { RoleCode } from '../common/constants/roles';
 import { DocumentReviewService } from './document-review.service';
 import { DocumentService } from './document.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
@@ -29,6 +33,7 @@ import { QueryDocumentDto } from './dto/query-document.dto';
 import { QueryReviewTasksDto, ReviewDecisionDto } from './dto/review.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { UploadParseDto } from './dto/upload-parse.dto';
+
 @Controller('documents')
 export class DocumentController {
   constructor(
@@ -38,66 +43,80 @@ export class DocumentController {
 
   // 创建文档
   @Post()
+  @RequirePermission(PermissionCode.documentCreate)
   create(@Body() dto: CreateDocumentDto, @CurrentUser() user: AuthUser) {
     return this.documentService.create(dto, user);
   }
 
   /** 审核待办列表（须在 @Get(':id') 之前注册，避免路由被 :id 吃掉） */
   @Get('reviews/tasks')
+  @Roles(RoleCode.REVIEWER, RoleCode.ADMIN)
+  @RequirePermission(PermissionCode.documentReview)
   listReviewTasks(@Query() query: QueryReviewTasksDto) {
     return this.reviewService.listTasks(query);
   }
 
   /** 待审核数量（导航角标等） */
   @Get('reviews/tasks/pending-count')
+  @Roles(RoleCode.REVIEWER, RoleCode.ADMIN)
+  @RequirePermission(PermissionCode.documentReview)
   pendingReviewCount() {
     return this.reviewService.getPendingCount();
   }
 
   // 查询文档列表
   @Get()
+  @RequirePermission(PermissionCode.documentList)
   findAll(@Query() query: QueryDocumentDto) {
     return this.documentService.findAll(query);
   }
 
   /** 直接发布文档（无审核；发布后 MQ 异步触发 RAG / KG / ES） */
   @Put(':id/publish')
-  publish(@Param('id') id: string) {
-    return this.documentService.publish(id);
+  @RequirePermission(PermissionCode.documentEdit)
+  publish(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentService.publish(id, user);
   }
 
   /** 归档：Published → Archived，并清 RAG/Search/KG 索引 */
   @Put(':id/archive')
-  archive(@Param('id') id: string) {
-    return this.documentService.archive(id);
+  @RequirePermission(PermissionCode.documentEdit)
+  archive(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentService.archive(id, user);
   }
 
   /** 下架编辑：Published → Draft，清索引后可改内容再提审/发布 */
   @Put(':id/save-draft')
-  saveAsDraft(@Param('id') id: string) {
-    return this.documentService.saveAsDraft(id);
+  @RequirePermission(PermissionCode.documentEdit)
+  saveAsDraft(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentService.saveAsDraft(id, user);
   }
 
   /** 单独提交审核（也可由 publish 在需审核时内部调用） */
   @Post(':id/reviews/submit')
-  submitReview(@Param('id') id: string) {
-    return this.reviewService.submitForReview(id);
+  @RequirePermission(PermissionCode.documentEdit)
+  submitReview(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.reviewService.submitForReview(id, user);
   }
 
   /** 当前待审记录（review_result IS NULL） */
   @Get(':id/reviews/current')
+  @RequirePermission(PermissionCode.documentList, PermissionCode.documentReview)
   getCurrentReview(@Param('id') id: string) {
     return this.reviewService.getCurrentReview(id);
   }
 
   /** 该文档全部审核历史，按 created_at 倒序 */
   @Get(':id/reviews/history')
+  @RequirePermission(PermissionCode.documentList, PermissionCode.documentReview)
   getReviewHistory(@Param('id') id: string) {
     return this.reviewService.getReviewHistory(id);
   }
 
   /** 审核通过 → 文档 Published + 重建索引 */
   @Post('reviews/tasks/:taskId/approve')
+  @Roles(RoleCode.REVIEWER, RoleCode.ADMIN)
+  @RequirePermission(PermissionCode.documentReview)
   approveReview(
     @Param('taskId') taskId: string,
     @Body() dto: ReviewDecisionDto,
@@ -113,6 +132,8 @@ export class DocumentController {
 
   /** 审核驳回 → 文档回 Draft，作者可修改后再次 submit */
   @Post('reviews/tasks/:taskId/reject')
+  @Roles(RoleCode.REVIEWER, RoleCode.ADMIN)
+  @RequirePermission(PermissionCode.documentReview)
   rejectReview(
     @Param('taskId') taskId: string,
     @Body() dto: ReviewDecisionDto,
@@ -128,12 +149,14 @@ export class DocumentController {
 
   // 查询文档详情
   @Get(':id')
+  @RequirePermission(PermissionCode.documentList)
   findOne(@Param('id') id: string) {
     return this.documentService.findOne(id);
   }
 
   // 更新文档
   @Patch(':id')
+  @RequirePermission(PermissionCode.documentEdit)
   update(
     @Param('id') id: string,
     @Body() dto: UpdateDocumentDto,
@@ -143,12 +166,14 @@ export class DocumentController {
   }
   // 软删除文档
   @Delete(':id')
+  @RequirePermission(PermissionCode.documentDelete)
   @HttpCode(HttpStatus.OK)
-  remove(@Param('id') id: string) {
-    return this.documentService.remove(id);
+  remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.documentService.remove(id, user);
   }
 
   @Post('upload/parse')
+  @RequirePermission(PermissionCode.documentCreate)
   @UseInterceptors(
     FileInterceptor('file', {
       limits: {

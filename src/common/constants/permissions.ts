@@ -1,9 +1,19 @@
 /*
  * @Date: 2026-09-18 16:00:55
  * @LastEditors: zhujinyi
- * @LastEditTime: 2026-09-18 16:00:57
+ * @LastEditTime: 2026-09-21 16:51:50
  */
 import { RoleCode } from './roles';
+
+/** 运行时校验用的权限编码 */
+export const PermissionCode = {
+  documentList: 'document:list',
+  documentCreate: 'document:create',
+  documentEdit: 'document:edit',
+  documentDelete: 'document:delete',
+  documentReview: 'document:review',
+  search: 'search',
+} as const;
 
 /** 管理员自动拥有的操作权限 */
 export const ADMIN_OPERATION_PERMISSIONS = [
@@ -16,6 +26,7 @@ export const ADMIN_OPERATION_PERMISSIONS = [
   'document:category:query',
   'document:tag',
   'document:version',
+  'search',
   'system:user',
   'system:role',
   'system:permission',

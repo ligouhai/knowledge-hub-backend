@@ -1,7 +1,7 @@
 /*
  * @Date: 2026-09-07 11:51:23
  * @LastEditors: zhujinyi
- * @LastEditTime: 2026-09-10 11:02:29
+ * @LastEditTime: 2026-09-21 15:59:00
  */
 /** RAG 重建索引消息 */
 export type ReindexType = 'BY_DOC_IDS' | 'DELETE_BY_DOC_IDS';
@@ -19,8 +19,6 @@ export interface SearchIndexMessage {
   taskId: string;
   type: SearchIndexType;
   documentId: string;
-  /** INDEX 时附带的文档快照；DELETE 时可省略 */
-  document?: Record<string, unknown>;
 }
 
 /** KG 知识图谱构建消息 */

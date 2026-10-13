@@ -1,0 +1,25 @@
+# This is an example configuration file
+# To learn more, see the full config.yaml reference: https://docs.continue.dev/reference
+
+name: Example Config
+version: 1.0.0
+schema: v1
+
+# Define which models can be used
+# https://docs.continue.dev/customization/models
+models:
+  - name: DeepSeek-V4-Flash
+    provider: deepseek
+    model: deepseek-v4-flash
+    apiKey: sk-c710a379c52c4846864b9cea09e61bc4
+  - name: DeepSeek V4 Pro
+    provider: deepseek
+    model: deepseek-v4-pro
+    apiKey: sk-c710a379c52c4846864b9cea09e61bc4
+
+    defaultCompletionOptions:
+      contextLength: 200000
+      maxTokens: 64000
+    capabilities:
+      - tool_use
+      - image_input
